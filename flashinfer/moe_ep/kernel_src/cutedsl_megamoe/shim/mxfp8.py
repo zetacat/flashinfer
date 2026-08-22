@@ -229,6 +229,7 @@ class MegaMoEMxfp8Frontend:
         inputs: MegaMoEMxfp8Inputs,
         *,
         num_tokens: Optional[int] = None,
+        zero_rows: Optional[int] = None,
         sync: bool = True,
         reset_counters: bool = False,
         reduce_topk: bool = True,
@@ -245,6 +246,13 @@ class MegaMoEMxfp8Frontend:
         reset is needed.  Pass ``True`` only to recover after an aborted /
         interrupted launch left the workspaces dirty.
 
+        ``zero_rows`` bounds the ``in_kernel_fc2_reduce`` pre-launch fill --
+        and the returned view -- to the first N rows, i.e. the rows the caller
+        will actually read back.  ``None`` (default) keeps the historical
+        whole-buffer behaviour.  It is deliberately SEPARATE from
+        ``num_tokens``: the launch itself must stay full-buffer (see the note
+        at the fill site), so the two cannot be collapsed into one knob.
+
         Steady state (same session buffers, same token count, same stream) is
         a validated-once fast path: validation and cute-tensor construction
         run only when the launch cache misses.
@@ -252,6 +260,12 @@ class MegaMoEMxfp8Frontend:
         resolved = self._resolve_num_tokens(inputs, num_tokens)
         if resolved == 0:
             return None
+        if zero_rows is not None and not 0 <= zero_rows <= resolved:
+            raise ValueError(
+                f"zero_rows must be in [0, {resolved}] (the launched row "
+                f"count), got {zero_rows}: every row the caller reads must "
+                "have been zeroed before the accumulate."
+            )
         key = self._launch_cache_key(inputs, resolved)
         mega = self._mega
         if mega is None or mega.compiled is None or mega.launch_key != key:
@@ -270,15 +284,35 @@ class MegaMoEMxfp8Frontend:
         if self.config.in_kernel_fc2_reduce:
             # ikr accumulate-from-zero contract: output_activation is the
             # cross-rank REDG atomic-add target, so it must be zeroed before
-            # every launch.  Zero the full raw buffer so stale rows beyond a
-            # partial num_tokens can't leak from an earlier, larger launch.
-            inputs.output_activation.zero_()
+            # every launch -- but only over the rows the caller reads back
+            # (``zero_rows``; None == the whole buffer, so the default is
+            # byte-identical to the previous unconditional fill).  Rows past
+            # that prefix provably need no zero:
+            #   * a peer can only REDG into a row THIS rank advertised -- the
+            #     dispatch is gated on topk_idx >= 0 (src/src/token_comm.py)
+            #     and staging holds topk_idx[n:] == -1 (shim/quant_stage.py),
+            #     so pad rows receive no accumulate at all;
+            #   * the REDG is row-local (per-row base + hidden offset), so a
+            #     write outside the prefix cannot perturb a row inside it;
+            #   * under ikr the kernel never READS this buffer back (the
+            #     in-kernel TopkReduce is const-folded out).
+            # Deliberately OUTSIDE the launch-cache block above: this must
+            # re-read zero_rows on EVERY call, because _launch_cache_key()
+            # pins num_tokens at the buffer capacity on the production path,
+            # so a batch-size change would otherwise never be observed here.
+            inputs.output_activation[:zero_rows].zero_()
         mega.compiled(**mega.launch_kwargs)
         # Zero-break capture gate: a device synchronize would abort stream
         # capture, so skip it there (the graph replays under stream semantics).
         if sync and not torch.cuda.is_current_stream_capturing():
             torch.cuda.synchronize()
-        return mega.launch_output
+        # Hand back only the rows that were zeroed: the SHAPE, not a comment,
+        # is what tells the caller which rows are valid.  A later change that
+        # let zero_rows drift below the read extent would then fail loudly on
+        # the caller's copy_ rather than silently return never-zeroed rows.
+        if zero_rows is None:
+            return mega.launch_output
+        return mega.launch_output[:zero_rows]
 
     def make_launch_thunk(
         self,
