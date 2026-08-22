@@ -1088,7 +1088,16 @@ def mxfp8_mega_moe(
     # (T, hidden) output; no host-side form-A reduction is needed.  Launch the
     # full padded buffer (topk_idx[n:] == -1 marks the pad rows) and copy the
     # live [:n] rows out -- matches the reference driver, which does not slice.
-    out = symm_buffer._frontend.run(inputs, num_tokens=None, sync=False)
+    #
+    # num_tokens STAYS None: the launch must remain full-buffer.  Threading n
+    # in here instead would enable _slice_inputs() and arm a real sender /
+    # receiver stride mismatch -- dispatch_prep derives its peer slot stride
+    # from the RUNTIME row count (MAX_SLOT_C = num_tokens * num_topk, in
+    # src/src/token_comm.py) while the puller indexes with the constexpr
+    # max_tokens_per_rank * num_topk, over a region that is not zeroed per
+    # launch.  zero_rows narrows ONLY the pre-launch ikr fill, to exactly the
+    # [:n] rows copied out just below.
+    out = symm_buffer._frontend.run(inputs, num_tokens=None, zero_rows=n, sync=False)
     if y is None:
         # Zero-copy: the caller consumes the workspace view under stream
         # ordering (valid until the next launch on this session's buffers).
