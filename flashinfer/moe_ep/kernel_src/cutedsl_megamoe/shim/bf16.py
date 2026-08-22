@@ -288,7 +288,18 @@ class MegaMoEBf16Frontend:
             mega.launch_kwargs = self._runtime_kwargs(inputs, mega)
             mega.launch_key = key
         if self.config.in_kernel_fc2_reduce:
-            inputs.combine_output.zero_()
+            # ikr accumulate-from-zero contract: combine_output is the
+            # cross-rank REDG atomic-add target and must be zeroed before
+            # every launch -- but only over the rows actually read back.
+            # ``n`` is the count _validate() range-checked above and the exact
+            # prefix returned below, so the zeroed and the consumed extents
+            # are the same variable by construction, with nothing to desync.
+            # combine_output is (num_max_tokens, 1, hidden) under ikr, so [:n]
+            # slices the token axis.  See the mxfp8 shim's run() for why the
+            # rows past n provably need no zero.
+            # Outside the launch-cache block on purpose (re-read every call);
+            # the launch is unaffected -- _runtime_kwargs() uses raw inputs.
+            inputs.combine_output[:n].zero_()
         mega.compiled(**mega.launch_kwargs)
         if sync:
             torch.cuda.synchronize()
