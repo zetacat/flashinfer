@@ -3287,6 +3287,8 @@ class TrtllmGenMlaDecodeRunner(TunableRunner):
             self.enable_pdl,
             self.workspace_buffer.numel() * self.workspace_buffer.element_size(),
             self.sinks,
+            None,  # rel_bias
+            0,  # rel_extent
             None,  # cum_seq_lens_q
             None,  # key_block_scales
             None,  # value_block_scales
@@ -4163,6 +4165,8 @@ def trtllm_batch_decode_with_kv_cache_mla(
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
+            None,  # rel_bias
+            0,  # rel_extent
             cum_seq_lens_q,
             None,  # key_block_scales
             None,  # value_block_scales

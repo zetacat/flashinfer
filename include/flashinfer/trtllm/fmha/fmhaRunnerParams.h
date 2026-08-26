@@ -260,6 +260,11 @@ struct TllmGenFmhaRunnerParams {
 
   // Attention sink
   float const* ptrAttentionSinks{nullptr};
+  // Relative attention bias, pre-scaled by log2e / mScaleSoftmaxLog2. Required by kernels
+  // generated with mUsesRelBias.
+  float const* ptrRelBias{nullptr};
+  // Number of query-to-key distances covered by ptrRelBias.
+  int32_t mRelExtent{0};
   // The output buffer.
   void* oPtr;
   // The output scaling factor buffer.

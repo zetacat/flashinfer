@@ -2895,6 +2895,8 @@ class TrtllmGenDecodeModule:
             enable_pdl,
             workspace_size,
             sinks,
+            None,  # rel_bias (wrapper api does not expose the relative attention bias)
+            0,  # rel_extent
             None,  # cum_seq_lens_q
             key_block_scales,
             value_block_scales,
@@ -3085,6 +3087,8 @@ def trtllm_batch_decode_with_kv_cache(
     o_sf_scale: Optional[float] = None,
     o_sf_vec_size: Optional[int] = None,
     sinks: Optional[List[torch.Tensor]] = None,
+    rel_bias: Optional[torch.Tensor] = None,
+    rel_extent: int = 0,
     kv_layout: str = "HND",
     enable_pdl: Optional[bool] = None,
     backend: str = "auto",
@@ -3175,6 +3179,15 @@ def trtllm_batch_decode_with_kv_cache(
     o_sf_vec_size : Optional[int] = None
         vector size for nvfp4 output tensor scale factor.
 
+    rel_bias : Optional[torch.Tensor] = None
+        Relative attention bias, shape ``[sum_seq_q, num_qo_heads, rel_extent]``, float32.
+        Values must be pre-scaled by ``log2(e) / bmm1_scale_log2`` (i.e. multiplied by
+        ``sqrt(head_dim)`` for the usual scale), because the kernel adds them to the raw
+        QK accumulator before the softmax scale is applied. Only accepted by cubins built
+        with the RelBias variant.
+    rel_extent : int = 0
+        Number of query-to-key distances covered by ``rel_bias``. Keys further from their
+        query than this receive no bias. Must be positive when ``rel_bias`` is given.
     sinks : Optional[List[torch.Tensor]] = None
         additional value per head in the denominator of the softmax.
 
@@ -3590,6 +3603,8 @@ def trtllm_batch_decode_with_kv_cache(
             enable_pdl,
             workspace_buffer.numel() * workspace_buffer.element_size(),
             sinks,
+            rel_bias,
+            rel_extent,
             cum_seq_lens_q,
             k_block_scales,
             v_block_scales,

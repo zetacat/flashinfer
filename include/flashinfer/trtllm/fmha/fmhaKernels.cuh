@@ -246,7 +246,7 @@ class TllmGenFmhaKernel {
                          bool dynamicNumTokensPerPage, bool reuseSmemKForV, bool uses2CtaMma,
                          bool groupsTokensHeadsQ, int sparseMlaType, bool skipsSoftmax,
                          int bf16QFp8KvTransformMode, bool uses2QSlidingWindowKernel,
-                         bool fp16Softmax, bool usesSpcompress) const {
+                         bool fp16Softmax, bool usesSpcompress, bool usesRelBias) const {
     FLASHINFER_CHECK((headDimPerCtaV >= 32) && (headDimQk >= 32) && (headDimV >= 32) &&
                          (headDimPerCtaV <= 1024) && (headDimQk <= 1024) && (headDimV <= 1024),
                      "Expect (32 <= headDim <= 1024), got headDimPerCtaV=%d, headDimQk=%d, "
@@ -303,7 +303,8 @@ class TllmGenFmhaKernel {
     // Bit 54 - 54: uses2QSlidingWindowKernel (Keeps generation 2Qx1KV SlidingWindowCustom).
     // Bit 55 - 55: fp16Softmax.
     // Bit 56 - 56: usesSpcompress.
-    // Bit 57 - 63: unused.
+    // Bit 57 - 57: usesRelBias (relative attention bias variant).
+    // Bit 58 - 63: unused.
     return (static_cast<uint64_t>(qkvLayout) << 0) | (static_cast<uint64_t>(maskType) << 2) |
            (static_cast<uint64_t>(kernelType) << 5) | (static_cast<uint64_t>(scheduler) << 8) |
            (static_cast<uint64_t>(multiCtasKvMode) << 10) |
@@ -321,12 +322,20 @@ class TllmGenFmhaKernel {
            (static_cast<uint64_t>(groupsTokensHeadsQ) << 53) |
            (static_cast<uint64_t>(uses2QSlidingWindowKernel) << 54) |
            (static_cast<uint64_t>(fp16Softmax) << 55) |
-           (static_cast<uint64_t>(usesSpcompress) << 56);
+           (static_cast<uint64_t>(usesSpcompress) << 56) |
+           (static_cast<uint64_t>(usesRelBias) << 57);
   }
 
   inline bool is2QSlidingWindowKernel(KernelMeta const& kernelMeta) const {
     return kernelMeta.mKernelType == static_cast<int>(FmhaKernelType::KeepsMmaAbForGeneration) &&
            kernelMeta.mGroupsTokensHeadsQ && kernelMeta.mStepQ == 2 * kernelMeta.mTileSizeQ;
+  }
+
+  // The relative attention bias variant is identified by its name: the trtllm-gen exporter
+  // appends "RelBias" for kernels generated with mUsesRelBias. Derived from the name rather
+  // than a metadata field so the downloaded flashInferMetaInfo.h needs no new column.
+  inline bool usesRelBiasKernel(KernelMeta const& kernelMeta) const {
+    return std::strstr(kernelMeta.mFuncName, "RelBias") != nullptr;
   }
 
   inline bool isDynamicNumTokensPerPageKernel(KernelMeta const& kernelMeta) const {
@@ -344,7 +353,8 @@ class TllmGenFmhaKernel {
         kernelMeta.mSparseAttn, kernelMeta.mSkipsSoftmaxWhenPossible,
         getBf16QFp8KvTransformMode(kernelMeta.mEnablesBf16QFp8KvKOnlyTransform,
                                    kernelMeta.mSeparateTransformedKv),
-        is2QSlidingWindowKernel(kernelMeta), kernelMeta.mFp16Softmax, kernelMeta.mUsesSpcompress);
+        is2QSlidingWindowKernel(kernelMeta), kernelMeta.mFp16Softmax, kernelMeta.mUsesSpcompress,
+        usesRelBiasKernel(kernelMeta));
   }
 
   std::pair<bool, std::string> checkIfKernelExist(RunnerParams const& params) const {
@@ -1208,7 +1218,9 @@ class TllmGenFmhaKernel {
         ", bf16QFp8KvTransformMode=" +
         std::to_string(static_cast<int>(selectKernelParams.mBf16QFp8KvTransformMode)) +
         ", fp16Softmax=" + std::to_string(selectKernelParams.mUseFp16Softmax) +
-        ", usesSpcompress=" + std::to_string(selectKernelParams.mUsesSpcompress);
+        ", usesSpcompress=" + std::to_string(selectKernelParams.mUsesSpcompress) +
+        ", usesRelBias=" +
+        std::to_string(params.ptrRelBias != nullptr && params.mRelExtent > 0);
     IKL_LOG_DEBUG(
         "Searching for kernel traits (%d available) in TllmGenFmhaKernel(%s, %s, %s, %s, %d) %s",
         getNumLoadedKernels(), toStr(mDtypeQ), toStr(mDtypeK), toStr(mDtypeV), toStr(mDtypeOut),
@@ -1227,7 +1239,8 @@ class TllmGenFmhaKernel {
                selectKernelParams.mSkipsSoftmaxWhenPossible,
                static_cast<int>(selectKernelParams.mBf16QFp8KvTransformMode),
                /*uses2QSlidingWindowKernel=*/false, selectKernelParams.mUseFp16Softmax,
-               selectKernelParams.mUsesSpcompress),
+               selectKernelParams.mUsesSpcompress,
+               /*usesRelBias=*/params.ptrRelBias != nullptr && params.mRelExtent > 0),
         info);
   }
 

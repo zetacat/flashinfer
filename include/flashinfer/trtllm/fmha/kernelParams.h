@@ -200,6 +200,19 @@ struct KernelParams {
   // true -> vLLM/FlashInfer; false -> TRT-LLM.
   bool mUsesSharedPagedKvIdx{true};
 
+  // NOTE: the tail below must mirror trtllm-gen's KernelParamsDecl.h field-for-field and in
+  // order. The cubin ABI is a prefix match, so a missing field shifts every later one.
+  // mSkipCorrThreshold is present in trtllm-gen but was absent here; it is required so that
+  // ptrRelBias does not land at its offset.
+
+  // Skip correction for row-max increases up to this base-2 threshold. 0 disables.
+  float mSkipCorrThreshold{0.f};
+  // Relative attention bias [sumOfSeqLensQ][mNumHeadsQ][mRelExtent], pre-scaled by
+  // log2e / mScaleSoftmaxLog2. Required by kernels generated with mUsesRelBias.
+  float const* ptrRelBias{nullptr};
+  // Number of query-to-key distances covered by ptrRelBias.
+  int32_t mRelExtent{0};
+
   // Create the TMA shape/stride for Q.
   template <class FmhaOptions>
   static auto makeTmaShapeStrideQ(FmhaOptions const& options, bool groupsHeadsQ,
@@ -921,6 +934,9 @@ struct KernelParams {
     params.mUseBlockSparseAttention = options.mUseBlockSparseAttention;
     // Whether the indices for K & V pages are shared as unified index (vLLM/FlashInfer).
     params.mUsesSharedPagedKvIdx = options.mUsesSharedPagedKvIdx;
+    // The relative attention bias.
+    params.ptrRelBias = options.ptrRelBias;
+    params.mRelExtent = options.mRelExtent;
     return params;
   }
 };

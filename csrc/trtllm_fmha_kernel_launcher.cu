@@ -107,7 +107,8 @@ void trtllm_paged_attention_launcher(
     void* out, void* out_scale_factor, void* query, void* key_cache, void* value_cache,
     void* workspace_buffer, void* multi_ctas_kv_counter_buffer, int64_t multi_ctas_kv_counter_size,
     int* block_tables, const void* k_block_scales_ptr, const void* v_block_scales_ptr,
-    int* seq_lens, int* cum_seq_lens_q, int* cum_seq_lens_kv, float* attention_sinks, float* lse,
+    int* seq_lens, int* cum_seq_lens_q, int* cum_seq_lens_kv, float* attention_sinks,
+    float* rel_bias, int64_t rel_extent, float* lse,
     Data_type q_data_type, Data_type kv_data_type, Data_type o_data_type,
     TllmPagedAttentionMode mode, int64_t batch_size, int64_t max_q_len, int64_t max_kv_len,
     int64_t num_pages_in_mem_pool, int64_t num_qo_heads, int64_t num_kv_heads, int64_t head_dim_qk,
@@ -201,6 +202,9 @@ void trtllm_paged_attention_launcher(
   runner_params.mSumOfSeqLensQ = sum_seq_q;
   runner_params.mUsesSharedPagedKvIdx = uses_shared_paged_kv_idx;
   runner_params.ptrAttentionSinks = attention_sinks;
+  // Relative attention bias. Required by cubins generated with mUsesRelBias; ignored otherwise.
+  runner_params.ptrRelBias = rel_bias;
+  runner_params.mRelExtent = static_cast<int32_t>(rel_extent);
   runner_params.enable_pdl = enable_pdl;
 
   // Block-sparse attention: per-KV-head page tables ([numHeadsKv, batchSize, maxNumPagesPerSeq])
@@ -353,6 +357,7 @@ void trtllm_paged_attention_decode(
     double o_sf_scale, int64_t o_sf_vec_size, int64_t o_sf_start_index, int64_t batch_size,
     int64_t window_left, int64_t sparse_mla_top_k, int64_t sm_count, bool enable_pdl,
     int64_t workspace_size, Optional<TensorView> attention_sinks,
+    Optional<TensorView> rel_bias, int64_t rel_extent,
     Optional<TensorView> cum_seq_lens_q, Optional<TensorView> key_block_scales,
     Optional<TensorView> value_block_scales, Optional<float> skip_softmax_threshold_scale_factor,
     Optional<bool> uses_shared_paged_kv_idx, Optional<TensorView> lse, int64_t lse_stride_tokens,
@@ -441,6 +446,12 @@ void trtllm_paged_attention_decode(
         << "attention_sinks must be a float tensor";
     attention_sinks_ptr = static_cast<float*>(attention_sinks.value().data_ptr());
   }
+  float* rel_bias_ptr = nullptr;
+  if (rel_bias.has_value()) {
+    TVM_FFI_ICHECK_EQ(rel_bias.value().dtype(), dl_float32) << "rel_bias must be a float tensor";
+    TVM_FFI_ICHECK_GT(rel_extent, 0) << "rel_extent must be positive when rel_bias is given";
+    rel_bias_ptr = static_cast<float*>(rel_bias.value().data_ptr());
+  }
   float* lse_ptr = nullptr;
   if (lse.has_value()) {
     TVM_FFI_ICHECK_EQ(lse.value().dtype(), dl_float32) << "lse must be a float32 tensor";
@@ -519,7 +530,8 @@ void trtllm_paged_attention_decode(
       multi_ctas_kv_counter_buffer.numel() * get_element_size(multi_ctas_kv_counter_buffer),
       static_cast<int*>(block_tables.data_ptr()), k_block_scales_ptr, v_block_scales_ptr,
       static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
-      /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, lse_ptr, q_data_type, kv_data_type,
+      /*cum_seq_lens_kv*/ nullptr, attention_sinks_ptr, rel_bias_ptr, rel_extent, lse_ptr,
+      q_data_type, kv_data_type,
       o_data_type, TllmPagedAttentionMode::ForGen, batch_size, max_q_len, max_kv_len,
       num_pages_in_mem_pool, num_qo_heads, num_kv_heads, head_dim_q, head_dim_o, page_size,
       q_stride_tokens, q_stride_heads, kv_stride_keys_values, kv_stride_heads, kv_stride_batch,
@@ -666,7 +678,7 @@ void trtllm_paged_attention_context(
       static_cast<int*>(seq_lens.data_ptr()),
       /*cum_seq_lens_q=*/static_cast<int*>(cum_seq_lens_q.data_ptr()),
       /*cum_seq_lens_kv=*/static_cast<int*>(cum_seq_lens_kv.data_ptr()), attention_sinks_ptr,
-      lse_ptr, q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::Context, batch_size,
+      /*rel_bias=*/nullptr, /*rel_extent=*/0, lse_ptr, q_data_type, kv_data_type, o_data_type, TllmPagedAttentionMode::Context, batch_size,
       max_q_len, max_kv_len, num_pages_in_mem_pool, num_qo_heads, num_kv_heads, head_dim_q,
       head_dim_o, page_size, q_stride_tokens, q_stride_heads, kv_stride_keys_values,
       kv_stride_heads, kv_stride_batch, max_num_blocks_per_seq, bmm1_scale_value, bmm2_scale_value,
@@ -1019,7 +1031,8 @@ void trtllm_paged_attention_decode_sparse_mla_dsv4(
       multi_ctas_kv_counter_buffer.numel() * get_element_size(multi_ctas_kv_counter_buffer),
       static_cast<int*>(sparse_indices.data_ptr()), /*k_block_scales_ptr=*/nullptr,
       /*v_block_scales_ptr=*/nullptr, static_cast<int*>(seq_lens.data_ptr()), cum_seq_lens_q_ptr,
-      /*cum_seq_lens_kv=*/nullptr, attention_sinks_ptr, /*lse=*/nullptr, q_data_type, kv_data_type,
+      /*cum_seq_lens_kv=*/nullptr, attention_sinks_ptr, /*rel_bias=*/nullptr, /*rel_extent=*/0,
+      /*lse=*/nullptr, q_data_type, kv_data_type,
       o_data_type, TllmPagedAttentionMode::ForGen, batch_size, max_q_len,
       /*max_kv_len=*/sparse_mla_top_k, sparse_num_pages_in_mem_pool, num_qo_heads, num_kv_heads,
       head_dim_q, head_dim_o, sparse_page_size, q_stride_tokens, q_stride_heads,
